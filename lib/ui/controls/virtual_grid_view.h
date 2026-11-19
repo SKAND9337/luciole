@@ -50,8 +50,15 @@ public:
   // Layout-time retirement of an inactive pooled tile. bindTile must replace any
   // previous binding; tile destruction remains responsible for final cleanup.
   virtual void releaseTile(Node& /*tile*/, Renderer& /*renderer*/) {}
-  // Called before binding/layout with actual viewport visibility, excluding overscan.
+  // Called before a tile node is destroyed by the grid view (e.g. on pool teardown or adapter change).
+  virtual void destroyTile(Node& /*tile*/) {}
+  // Called with actual viewport visibility, excluding overscan.
   virtual void setTileVisible(Node&, bool) {}
+  // Called once at the start of each tile-layout pass, before any bindTile()
+  // calls for that pass. When fastScroll is true the scroll velocity exceeds
+  // the reveal threshold; adapters should skip entry animations and show tiles
+  // at their final state immediately.
+  virtual void beginTileLayout(bool /*fastScroll*/) {}
 
   // Optional: respond to an activation gesture (click). The grid still
   // updates its own selection state and fires onSelectionChanged.
@@ -276,4 +283,9 @@ private:
   bool m_dragThresholdPassed = false;
   // Hides the hovered item's tooltip after an adapter-consumed press, until the hover target changes.
   bool m_tooltipSuppressed = false;
+  // Fast-scroll detection state; updated in onScrollChanged, read in doLayout.
+  float m_lastScrollOffset = 0.0F;
+  std::chrono::steady_clock::time_point m_lastScrollTime;
+  float m_scrollVelocity = 0.0F;
+  bool m_fastScroll = false;
 };

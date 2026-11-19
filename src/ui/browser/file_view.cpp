@@ -7,6 +7,7 @@
 #include "fs/entry_access.h"
 #include "fs/gio_ptr.h"
 #include "model/details_columns.h"
+#include "render/animation/animation_manager.h"
 #include "ui/browser/file_icon.h"
 #include "ui/browser/file_view_metrics.h"
 #include "ui/builders.h"
@@ -331,7 +332,26 @@ luciole::FileViewAdapter::FileViewAdapter(
     std::function<std::uint32_t()> modifiers, std::function<bool()> focused
 )
     : m_browser(browser), m_icons(icons), m_thumbnails(thumbnails), m_mode(mode), m_modifiers(std::move(modifiers)),
-      m_focused(std::move(focused)) {}
+      m_focused(std::move(focused)), m_localReveal(std::in_place), m_reveal(&*m_localReveal) {}
+
+luciole::FileViewAdapter::FileViewAdapter(
+    BrowserController& browser, FileIconCache& icons, ThumbnailService& thumbnails, ViewMode mode,
+    std::function<std::uint32_t()> modifiers, std::function<bool()> focused, RevealState& reveal,
+    AnimationManager* animations
+)
+    : m_browser(browser), m_icons(icons), m_thumbnails(thumbnails), m_mode(mode), m_modifiers(std::move(modifiers)),
+      m_focused(std::move(focused)), m_reveal(&reveal), m_animations(animations) {}
+
+luciole::FileViewAdapter::~FileViewAdapter() { resetReveal(); }
+
+void luciole::FileViewAdapter::beginTileLayout(bool fastScroll) {
+  // m_reveal is always set: either to m_localReveal (6-arg constructor) or to
+  // the BrowserPage-owned RevealState (8-arg constructor). The null guard is a
+  // safety net for any future construction path that omits animation state.
+  if (m_reveal != nullptr) {
+    m_reveal->fastScroll = fastScroll;
+  }
+}
 
 std::size_t luciole::FileViewAdapter::itemCount() const { return m_browser.model().rows().size(); }
 std::unique_ptr<Node> luciole::FileViewAdapter::createTile() {
@@ -374,13 +394,27 @@ void luciole::FileViewAdapter::setTileVisible(Node& tile, bool visible) {
   } else {
     static_cast<FileRow&>(tile).setThumbnailVisible(visible);
   }
+  // Scroll-reveal: animate tiles in the first time they enter the visible
+  // viewport (excluding overscan rows).
+  if (visible && m_reveal != nullptr) {
+    const auto it = m_tileIndices.find(&tile);
+    if (it != m_tileIndices.end() && !m_reveal->revealedIndices.contains(it->second)) {
+      startReveal(tile, it->second);
+    }
+  }
 }
 void luciole::FileViewAdapter::releaseTile(Node& tile, Renderer& renderer) {
+  cancelTileAnimation(tile);
+  m_tileIndices.erase(&tile);
   if (m_mode == ViewMode::Grid) {
     static_cast<FileTile&>(tile).releaseFile(renderer);
   } else {
     static_cast<FileRow&>(tile).releaseFile(renderer);
   }
+}
+void luciole::FileViewAdapter::destroyTile(Node& tile) {
+  cancelTileAnimation(tile);
+  m_tileIndices.erase(&tile);
 }
 void luciole::FileViewAdapter::bindTile(Node& tile, std::size_t index, bool, bool hovered) {
   const auto& model = m_browser.model();
@@ -418,6 +452,111 @@ void luciole::FileViewAdapter::bindTile(Node& tile, std::size_t index, bool, boo
       );
     }
   }
+  m_tileIndices[&tile] = index;
+  // If the pool slot was previously animating a different index (recycled
+  // while mid-animation), cancel that animation and snap to fully visible.
+  const auto it = m_animatingTiles.find(&tile);
+  if (it != m_animatingTiles.end() && it->second != index) {
+    cancelTileAnimation(tile);
+  }
+}
+
+void luciole::FileViewAdapter::startReveal(Node& tile, std::size_t index) {
+  // Mark the index as revealed immediately so that subsequent bindTile()
+  // calls for the same index (e.g. a re-layout triggered by a resize) do
+  // not replay the entry animation.
+  m_reveal->revealedIndices.insert(index);
+
+  // Skip the animation entirely when: animations are disabled, the manager
+  // is unavailable, or the user is scrolling fast (velocity > 3.5 viewports/sec).
+  if (m_animations == nullptr || m_reveal->fastScroll) {
+    cancelTileAnimation(tile);
+    return;
+  }
+
+  // Cancel any in-flight animation for this tile slot (the slot may have
+  // been recycled from a previous item while still mid-animation).
+  m_animations->cancelForOwner(&tile);
+  m_animatingTiles[&tile] = index;
+
+  // Micro-stagger: within the first 250 ms after a directory load, top tiles
+  // fade in one after the other with a 12 ms delay per item (up to 7 items).
+  const float elapsedSinceLoad =
+      std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - m_reveal->loadTime).count();
+  const float staggerMs = (elapsedSinceLoad < 250.0F && index < 8) ? static_cast<float>(index) * 12.0F : 0.0F;
+
+  tile.setOpacity(0.0F);
+  tile.setTranslate(0.0F, 8.0F);
+
+  // The animation runs for (staggerMs + kAnimDurationMs) total. During the
+  // stagger portion the tile stays hidden; once stagger elapses we apply an
+  // EaseOutCubic fade + upward-slide over kAnimDurationMs.
+  //
+  // We use a single Linear animation rather than chained animations because
+  // AnimationManager::animate() has no built-in delay parameter. The linear
+  // rawT maps cleanly to elapsed milliseconds, letting us implement the delay
+  // period ourselves inside the setter without an extra timer handle.
+  constexpr float kAnimDurationMs = 180.0F;
+  const float totalDurationMs = staggerMs + kAnimDurationMs;
+
+  m_animations->animate(
+      0.0F, 1.0F, totalDurationMs, Easing::Linear,
+      [&tile, staggerMs, totalDurationMs](float rawT) {
+        const float elapsedMs = rawT * totalDurationMs;
+        if (elapsedMs < staggerMs) {
+          // Still in the stagger delay: keep tile invisible.
+          tile.setOpacity(0.0F);
+          tile.setTranslate(0.0F, 8.0F);
+          return;
+        }
+        const float progress = std::clamp((elapsedMs - staggerMs) / kAnimDurationMs, 0.0F, 1.0F);
+        const float eased = applyEasing(Easing::EaseOutCubic, progress);
+        tile.setOpacity(eased);
+        tile.setTranslate(0.0F, 8.0F * (1.0F - eased));
+      },
+      [this, &tile] {
+        m_animatingTiles.erase(&tile);
+        tile.setOpacity(1.0F);
+        tile.setTranslate(0.0F, 0.0F);
+      },
+      &tile
+  );
+}
+
+void luciole::FileViewAdapter::cancelTileAnimation(Node& tile) {
+  m_animatingTiles.erase(&tile);
+  if (m_animations != nullptr) {
+    m_animations->cancelForOwner(&tile);
+  }
+  tile.setOpacity(1.0F);
+  tile.setTranslate(0.0F, 0.0F);
+}
+
+void luciole::FileViewAdapter::setAnimationManager(AnimationManager* animations) {
+  if (animations != m_animations && m_animations != nullptr) {
+    for (const auto& [tile, _] : m_animatingTiles) {
+      m_animations->cancelForOwner(tile);
+      tile->setOpacity(1.0F);
+      tile->setTranslate(0.0F, 0.0F);
+    }
+    m_animatingTiles.clear();
+  }
+  m_animations = animations;
+}
+
+void luciole::FileViewAdapter::resetReveal() {
+  // Cancel all in-flight animations and immediately snap tiles to their
+  // final visible state. Called on directory navigation and in the destructor
+  // to ensure no animation callbacks reference a stale FileViewAdapter*.
+  for (const auto& [tile, _] : m_animatingTiles) {
+    if (m_animations != nullptr) {
+      m_animations->cancelForOwner(tile);
+    }
+    tile->setOpacity(1.0F);
+    tile->setTranslate(0.0F, 0.0F);
+  }
+  m_animatingTiles.clear();
+  m_tileIndices.clear();
 }
 
 bool luciole::FileViewAdapter::onPointerPress(std::size_t index, float x, float, float width, float) {

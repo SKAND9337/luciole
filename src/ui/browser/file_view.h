@@ -7,21 +7,59 @@
 #include "ui/controls/virtual_grid_view.h"
 
 #include <chrono>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+
+class AnimationManager;
 
 namespace luciole {
+  //
+  // Per-directory animation bookkeeping shared between the List and Grid
+  // adapters so that switching view mode does not replay entry animations.
+  //
+  // BrowserPage owns one RevealState and passes a reference to both adapters.
+  // FileViewAdapter (6-arg constructor) owns its own m_localReveal for use
+  // in contexts that have no shared RevealState (e.g. unit tests).
+  struct RevealState {
+    // Indices that have already played their reveal animation. Grows as the
+    // user scrolls; cleared by reset() on directory navigation.
+    std::unordered_set<std::size_t> revealedIndices;
+    // Captured at directory load time (or reset()), used to compute the
+    // micro-stagger window (first 250 ms). The in-place initializer captures
+    // construction time; reset() refreshes it.
+    std::chrono::steady_clock::time_point loadTime = std::chrono::steady_clock::now();
+    // Set by VirtualGridView when scroll velocity exceeds 3.5 viewports/sec.
+    // Cleared automatically after 150 ms of idle scrolling.
+    bool fastScroll = false;
+    void reset() {
+      revealedIndices.clear();
+      loadTime = std::chrono::steady_clock::now();
+      fastScroll = false;
+    }
+  };
+
   class FileViewAdapter final : public VirtualGridAdapter {
   public:
     FileViewAdapter(
         BrowserController& browser, FileIconCache& icons, ThumbnailService& thumbnails, ViewMode mode,
         std::function<std::uint32_t()> modifiers, std::function<bool()> focused
     );
+    FileViewAdapter(
+        BrowserController& browser, FileIconCache& icons, ThumbnailService& thumbnails, ViewMode mode,
+        std::function<std::uint32_t()> modifiers, std::function<bool()> focused, RevealState& reveal,
+        AnimationManager* animations
+    );
+    ~FileViewAdapter() override;
     std::size_t itemCount() const override;
     std::string itemTooltip(std::size_t index) const override;
     [[nodiscard]] std::unique_ptr<Node> createTile() override;
     std::unique_ptr<Node> createDecoration() override;
     void bindDecoration(Node& decoration, const VirtualGridDecorationLayout& layout) override;
+    void beginTileLayout(bool fastScroll) override;
     void setTileVisible(Node& tile, bool visible) override;
     void releaseTile(Node& tile, Renderer& renderer) override;
+    void destroyTile(Node& tile) override;
     void bindTile(Node& tile, std::size_t index, bool selected, bool hovered) override;
     bool onPointerPress(std::size_t index, float, float, float, float) override;
     bool onPointerDrag(std::optional<std::size_t>, float, float, float, float) override;
@@ -50,6 +88,8 @@ namespace luciole {
     void setDetailsColumnOrder(DetailsColumnOrder order) { m_columnOrder = order; }
     void setColumnActive(bool active) { m_columnActive = active; }
     void setPathEntry(std::optional<EntryId> entry) { m_pathEntry = entry; }
+    void setAnimationManager(AnimationManager* animations);
+    void resetReveal();
 
   private:
     BrowserController& m_browser;
@@ -86,5 +126,23 @@ namespace luciole {
     std::uint64_t m_areaGeneration = 0;
     bool m_areaSelection = false;
     bool m_areaToggle = false;
+    void startReveal(Node& tile, std::size_t index);
+    void cancelTileAnimation(Node& tile);
+    // Map from tile node pointer to the logical index it is currently animating.
+    // Entries are added in startReveal() and removed in cancelTileAnimation()
+    // and the onComplete callback. Used to detect recycled slots that are still
+    // mid-animation for a different index.
+    std::unordered_map<Node*, std::size_t> m_animatingTiles;
+    // Tracks the current logical index bound to each tile node.
+    std::unordered_map<Node*, std::size_t> m_tileIndices;
+    // Fallback RevealState used by the 6-arg constructor when no shared state
+    // is provided (e.g. unit tests, Miller columns).
+    std::optional<RevealState> m_localReveal;
+    // Non-owning pointer to the active RevealState. Always non-null after
+    // construction; either points into m_localReveal or into BrowserPage.
+    RevealState* m_reveal = nullptr;
+    // Non-owning pointer to the application's AnimationManager. Null means
+    // animations are disabled (6-arg constructor or scroll_reveal = false).
+    AnimationManager* m_animations = nullptr;
   };
 } // namespace luciole

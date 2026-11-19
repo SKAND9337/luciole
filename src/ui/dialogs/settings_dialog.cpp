@@ -107,6 +107,7 @@ SettingsDialog::SettingsDialog(
   addBool(P::ShowPermanentDeletion, "Show Delete Permanently in Context Menus");
   addBool(P::SwitchToNewTab, "Switch to New Folder Tabs");
   addBool(P::RestoreLastWindow, "Restore Tabs from Last Closed Window");
+  addBool(P::ReduceAnimations, "Reduce Animations");
   card("Terminal");
   addTerminal();
   section("Appearance", "paint");

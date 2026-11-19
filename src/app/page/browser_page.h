@@ -371,6 +371,7 @@ private:
   std::string m_thumbnailError;
   std::uint64_t m_thumbnailRevision = 0;
   std::uint64_t m_thumbnailContext = 0;
+  luciole::RevealState m_reveal;
   luciole::FileViewAdapter m_listAdapter;
   luciole::FileViewAdapter m_gridAdapter;
   luciole::ViewPreferenceWriter& m_preferences;

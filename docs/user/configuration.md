@@ -40,6 +40,10 @@ corner_radius_scale = 1.0
 sort_by = "name"
 directories_first = true
 hidden_last = false
+reduce_animations = false
+
+[animations]
+scroll_reveal = true
 ```
 
 Validate one file without opening a window or reading adjacent GUI overrides:
@@ -87,6 +91,7 @@ All keys below belong in `[browser]`. Dimensions are logical pixels unless state
 | `switch_to_new_tab` | `true` | Switch when opening a folder in a new tab; disable to keep browsing the current tab |
 | `restore_last_window` | `false` | Reopen tabs from the last closed window once in a new window, or at startup without a requested location |
 | `terminal_command` | `""` | Terminal command and optional arguments, for example `"foot"`; empty uses `$TERMINAL`, then automatic discovery |
+| `reduce_animations` | `false` | Disable animated transitions such as scroll reveal |
 | `sort_by` | `"name"` | `"name"`, `"type"`, `"size"`, `"modified"`, `"accessed"`, `"created"`, `"owner"`, `"group"`, `"permissions"`, `"location"` |
 | `sort_descending` | `false` | Reverse sort direction |
 | `directories_first` | `true` | Group folders, and links to local folders, before files |
@@ -141,6 +146,14 @@ Name accepts `0` for automatic sizing or an integer from `160` through `16384`. 
 Local policy generates thumbnails for eligible local files. It skips network shares and FUSE mounts without a local disk, such as rclone and sshfs. A FUSE mount of local files that has no disk of its own, such as gocryptfs, is skipped too; choose All Locations to get its thumbnails. To generate thumbnails on mounted network shares such as `/mnt/media`, choose Settings → Thumbnails → Show Thumbnails → All Locations. All permits generation from filesystem paths, including mounted shares, and reuses the shared thumbnail cache. Locations without a filesystem path remain cache-only; Luciole does not download entire remote files for thumbnail generation.
 
 The Image/PDF Size Limit applies to image and PDF sources. Video stills and embedded audio artwork use seekable media access and are not rejected merely because their files exceed that limit. There is no pixel-count limit: a decoding helper's memory, CPU time and output limits decide how large an image can be, which admits phone photos up to about 200 megapixels. Settings also provides cache inspection/clearing. Luciole reuses compatible shared thumbnails and preserves cache files created or replaced by other applications. Older Luciole video thumbnails regenerate using representative frames instead of always taking the opening frame. With `ffmpegthumbnailer` installed, newly generated video thumbnails include its filmstrip edges, stored in the shared cache so other file managers display them too. Missing/failing helpers keep a plain thumbnail. The edges come from the thumbnailer rather than the icon theme. Native video previews generate clean frames separately.
+
+## Animations
+
+The `[animations]` table configures visual transition effects:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `scroll_reveal` | `true` | Animate file entries smoothly into view when scrolling. Set to `false` for instant, animation-free rendering. Synchronized with `browser.reduce_animations`. |
 
 ## Other writable data
 

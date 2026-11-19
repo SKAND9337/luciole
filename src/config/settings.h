@@ -52,11 +52,18 @@ namespace luciole {
     DetailsColumnWidths columnWidths = kDefaultDetailsColumnWidths;
     ThumbnailOptions thumbnails;
     std::string terminalCommand;
+    bool reduceAnimations = false;
     bool operator==(const BrowserSettings&) const = default;
+  };
+
+  struct AnimationSettings {
+    bool scrollReveal = true;
+    bool operator==(const AnimationSettings&) const = default;
   };
 
   struct Settings {
     BrowserSettings browser;
+    AnimationSettings animations;
     bool operator==(const Settings&) const = default;
   };
 
@@ -132,6 +139,7 @@ namespace luciole {
     ThumbnailMaxFileMib,
     ThumbnailCacheMib,
     TerminalCommand,
+    ReduceAnimations,
     Count
   };
 
@@ -216,6 +224,7 @@ namespace luciole {
     static constexpr PreferenceKey<luciole::ThumbnailPolicy> ThumbnailPolicy{Id::ThumbnailPolicy};
     static constexpr PreferenceKey<int> ThumbnailMaxFileMib{Id::ThumbnailMaxFileMib};
     static constexpr PreferenceKey<int> ThumbnailCacheMib{Id::ThumbnailCacheMib};
+    static constexpr PreferenceKey<bool> ReduceAnimations{Id::ReduceAnimations};
   };
 
   // The BrowserSettings field a preference reads and writes.

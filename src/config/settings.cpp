@@ -365,6 +365,7 @@ namespace {
           {between<16, 8192>, "expected an integer from 16 to 8192"}
       ),
       describe(P::TerminalCommand, "terminal_command", [](S& s) -> auto& { return s.terminalCommand; }),
+      describe(P::ReduceAnimations, "reduce_animations", [](S& s) -> auto& { return s.reduceAnimations; }),
   };
   constexpr std::size_t kPreferenceCount = std::tuple_size_v<decltype(kPreferences)>;
   static_assert(kPreferenceCount == std::to_underlying(luciole::BrowserPreferenceId::Count));
@@ -463,9 +464,15 @@ namespace {
 
   enum class UnknownSettings { Reject, Warn };
 
+  // Partial patch for the [animations] TOML table. Each field is optional so
+  // absent keys fall back to the AnimationSettings default.
+  struct AnimationPatch {
+    std::optional<bool> scrollReveal;
+  };
+
   std::expected<Patch, luciole::ConfigIssues> parse(
       const std::filesystem::path& file, std::string_view text, UnknownSettings unknown = UnknownSettings::Reject,
-      toml::table* document = nullptr
+      toml::table* document = nullptr, AnimationPatch* animPatch = nullptr
   ) {
     auto table = luciole::parseToml(text, file);
     if (!table) {
@@ -494,6 +501,7 @@ namespace {
           decoder.issue(node, "browser", "expected a table");
           continue;
         }
+        std::optional<bool> browserScrollReveal;
         for (const auto& [name, value] : *browser) {
           bool known = false;
           forEachPreference([&](auto index) {
@@ -508,8 +516,46 @@ namespace {
               decoder.issue(value, preferenceKey(descriptor), expected(descriptor.rule));
             }
           });
+          if (!known && name == "scroll_reveal") {
+            known = true;
+            if (const auto decoded = decode(Rule<bool>{}, value)) {
+              browserScrollReveal = decoded;
+            } else {
+              decoder.issue(value, "browser.scroll_reveal", expected(Rule<bool>{}));
+            }
+          }
           if (!known) {
             unknownSetting(value, std::format("browser.{}", name.str()));
+          }
+        }
+        if (browserScrollReveal && !std::get<std::to_underlying(P::ReduceAnimations.id())>(patch).has_value()) {
+          std::get<std::to_underlying(P::ReduceAnimations.id())>(patch) = !*browserScrollReveal;
+        }
+      } else if (key == "animations") {
+        const auto* animations = node.as_table();
+        if (animations == nullptr) {
+          decoder.issue(node, "animations", "expected a table");
+        } else {
+          for (const auto& [name, value] : *animations) {
+            if (name == "scroll_reveal") {
+              if (const auto decoded = decode(Rule<bool>{}, value)) {
+                if (animPatch != nullptr) {
+                  animPatch->scrollReveal = decoded;
+                }
+              } else {
+                decoder.issue(value, "animations.scroll_reveal", expected(Rule<bool>{}));
+              }
+            } else if (name == "reduce_animations") {
+              if (const auto decoded = decode(Rule<bool>{}, value)) {
+                if (animPatch != nullptr) {
+                  animPatch->scrollReveal = !*decoded;
+                }
+              } else {
+                decoder.issue(value, "animations.reduce_animations", expected(Rule<bool>{}));
+              }
+            } else {
+              unknownSetting(value, std::format("animations.{}", name.str()));
+            }
           }
         }
       } else {
@@ -547,6 +593,8 @@ namespace {
     if (const auto* existing = document["browser"].as_table()) {
       browser = *existing;
     }
+    browser.erase("scroll_reveal");
+    document.erase("animations");
     forEachPreference([&](auto index) {
       const auto& descriptor = std::get<index>(kPreferences);
       browser.erase(descriptor.key);
@@ -635,7 +683,8 @@ luciole::ConfigIssues luciole::validateConfigFile(const std::filesystem::path& f
   if (!text) {
     return {std::move(text.error())};
   }
-  auto parsed = parse(file, **text);
+  AnimationPatch animPatch;
+  auto parsed = parse(file, **text, UnknownSettings::Reject, nullptr, &animPatch);
   return parsed ? ConfigIssues{} : std::move(parsed.error());
 }
 
@@ -654,12 +703,19 @@ static luciole::SettingsResult loadLayers(const luciole::ConfigPaths& paths, boo
     if (!*text) {
       continue;
     }
-    auto parsed = parse(*file, **text, UnknownSettings::Warn);
+    AnimationPatch animPatch;
+    auto parsed = parse(*file, **text, UnknownSettings::Warn, nullptr, &animPatch);
     if (!parsed) {
       auto& errors = parsed.error();
       issues.insert(issues.end(), std::make_move_iterator(errors.begin()), std::make_move_iterator(errors.end()));
     } else {
       applyPatch(settings, *parsed);
+      if (std::get<std::to_underlying(P::ReduceAnimations.id())>(*parsed).has_value()) {
+        settings.animations.scrollReveal = !settings.browser.reduceAnimations;
+      } else if (animPatch.scrollReveal.has_value()) {
+        settings.animations.scrollReveal = *animPatch.scrollReveal;
+        settings.browser.reduceAnimations = !*animPatch.scrollReveal;
+      }
     }
   }
   if (!issues.empty()) {
@@ -729,24 +785,39 @@ luciole::AtomicWriteState luciole::ConfigService::saveOverrides(std::span<const 
           return std::unexpected("cannot load base configuration");
         }
         if (*base) {
-          const auto parsed = parse(m_paths.base, **base, UnknownSettings::Warn);
+          AnimationPatch animPatch;
+          const auto parsed = parse(m_paths.base, **base, UnknownSettings::Warn, nullptr, &animPatch);
           if (!parsed) {
             m_issues = parsed.error();
             return std::unexpected("invalid base configuration");
           }
           applyPatch(candidate, *parsed);
+          if (std::get<std::to_underlying(P::ReduceAnimations.id())>(*parsed).has_value()) {
+            candidate.animations.scrollReveal = !candidate.browser.reduceAnimations;
+          } else if (animPatch.scrollReveal.has_value()) {
+            candidate.animations.scrollReveal = *animPatch.scrollReveal;
+            candidate.browser.reduceAnimations = !*animPatch.scrollReveal;
+          }
         }
         toml::table document;
-        auto patch = parse(m_paths.overrides, current.value_or(""), UnknownSettings::Warn, &document);
+        AnimationPatch animPatch;
+        auto patch = parse(m_paths.overrides, current.value_or(""), UnknownSettings::Warn, &document, &animPatch);
         if (!patch) {
           m_issues = std::move(patch.error());
           return std::unexpected("invalid existing settings");
+        }
+        if (animPatch.scrollReveal.has_value()
+            && !std::get<std::to_underlying(P::ReduceAnimations.id())>(*patch).has_value()) {
+          std::get<std::to_underlying(P::ReduceAnimations.id())>(*patch) = !*animPatch.scrollReveal;
         }
         const auto previous = *patch;
         for (const auto& edit : edits) {
           editPatch(*patch, edit);
         }
         applyPatch(candidate, *patch);
+        if (std::get<std::to_underlying(P::ReduceAnimations.id())>(*patch).has_value()) {
+          candidate.animations.scrollReveal = !candidate.browser.reduceAnimations;
+        }
         if (*patch == previous) {
           return std::nullopt;
         }

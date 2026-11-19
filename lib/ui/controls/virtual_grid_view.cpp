@@ -6,6 +6,7 @@
 #include "ui/style.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <linux/input-event-codes.h>
 #include <memory>
@@ -96,7 +97,16 @@ VirtualGridView::VirtualGridView() {
   m_selectionBox = static_cast<Box*>(m_canvas->addChild(std::move(selectionBox)));
 }
 
-VirtualGridView::~VirtualGridView() { stopAreaScroll(); }
+VirtualGridView::~VirtualGridView() {
+  stopAreaScroll();
+  if (m_adapter != nullptr) {
+    for (Node* tile : m_pool) {
+      if (tile != nullptr) {
+        m_adapter->destroyTile(*tile);
+      }
+    }
+  }
+}
 
 void VirtualGridView::bindScrollState(ScrollViewState* state) { m_scroll->bindState(state); }
 
@@ -127,6 +137,7 @@ void VirtualGridView::setAdapter(VirtualGridAdapter* adapter) {
     if (tile != nullptr) {
       if (previousAdapter != nullptr) {
         previousAdapter->setTileVisible(*tile, false);
+        previousAdapter->destroyTile(*tile);
       }
       m_canvas->removeChild(tile);
     }
@@ -152,6 +163,9 @@ void VirtualGridView::setAdapter(VirtualGridAdapter* adapter) {
 void VirtualGridView::notifyDataChanged() {
   // Force every visible slot to rebind on the next layout.
   std::ranges::fill(m_slotBoundIndex, std::nullopt);
+  m_fastScroll = false;
+  m_scrollVelocity = 0.0F;
+  m_lastScrollTime = {};
   markLayoutDirty();
 }
 
@@ -252,6 +266,9 @@ void VirtualGridView::scrollToIndex(std::size_t index, bool alignToTop, float wi
   m_pendingScrollToIndex = true;
   m_pendingScrollAlignTop = alignToTop;
   m_pendingScrollIndex = index;
+  m_fastScroll = false;
+  m_scrollVelocity = 0.0F;
+  m_lastScrollTime = {};
   markLayoutDirty();
 }
 
@@ -503,6 +520,24 @@ void VirtualGridView::doLayout(Renderer& renderer) {
   m_visibleStartIndex = firstRow * columns;
   std::vector<bool> slotActive(m_pool.size(), false);
 
+  //
+  // Fast-scroll state decays after 150 ms of idle scrolling so that tiles
+  // appearing after the user stops flinging still animate in. The check in
+  // onScrollChanged only fires on actual scroll events; this decay runs every
+  // layout pass as a safety net for the gap between the last event and the
+  // next frame.
+  if (m_fastScroll) {
+    const auto now = std::chrono::steady_clock::now();
+    const float elapsed = std::chrono::duration<float, std::milli>(now - m_lastScrollTime).count();
+    if (elapsed > 150.0F) {
+      m_fastScroll = false;
+      m_scrollVelocity = 0.0F;
+    }
+  }
+  if (m_adapter != nullptr) {
+    m_adapter->beginTileLayout(m_fastScroll);
+  }
+
   if (poolRows > 0 && visibleRowCount > 0) {
     for (std::size_t row = firstRow; row <= lastRow; ++row) {
       const std::size_t poolRow = row % poolRows;
@@ -526,7 +561,6 @@ void VirtualGridView::doLayout(Renderer& renderer) {
         const float y = static_cast<float>(row) * (cellH + m_rowGap);
         tile->setPosition(x, y);
         tile->setSize(cellW, cellH);
-        m_adapter->setTileVisible(*tile, y + cellH > scrollY && y < scrollY + viewportH);
 
         InputArea* tooltipArea = m_poolTooltipAreas[slot];
         tooltipArea->setPosition(x, y);
@@ -552,6 +586,7 @@ void VirtualGridView::doLayout(Renderer& renderer) {
           m_slotBoundOverlayHovered[slot] = overlayHovered;
         }
         tile->setVisible(true);
+        m_adapter->setTileVisible(*tile, y + cellH > scrollY && y < scrollY + viewportH);
         // Canvas's doLayout is a no-op, so we lay out each pool tile explicitly
         // here, otherwise the inner glyph/label children never get measured.
         tile->layout(renderer);
@@ -622,6 +657,37 @@ LayoutSize VirtualGridView::doMeasure(Renderer& /*renderer*/, const LayoutConstr
 void VirtualGridView::doArrange(Renderer& renderer, const LayoutRect& rect) { arrangeByLayout(renderer, rect); }
 
 void VirtualGridView::onScrollChanged(float offset) {
+  //
+  // Velocity-based fast-scroll detection. We compute an exponential moving average
+  // of scroll velocity in viewports per second. High-speed flinging (> 3.5 vp/s)
+  // bypasses reveal animations to preserve 60/120+ FPS rendering without stutter.
+  //
+  // The initial scroll event has no prior reference point, so the first call
+  // only sets the baseline. Stale intervals (> 300 ms) are discarded to avoid
+  // treating a resumed scroll after a pause as a fling.
+  const auto now = std::chrono::steady_clock::now();
+  const bool hasScrollHistory = m_lastScrollTime.time_since_epoch().count() > 0;
+  if (hasScrollHistory) {
+    const float elapsed = std::chrono::duration<float, std::milli>(now - m_lastScrollTime).count();
+    if (elapsed >= 300.0F) {
+      m_scrollVelocity = 0.0F;
+      m_fastScroll = false;
+      m_lastScrollOffset = offset;
+      m_lastScrollTime = now;
+    } else if (elapsed >= 1.0F) {
+      const float viewportH = (m_scroll != nullptr) ? m_scroll->contentViewportHeight() : 1.0F;
+      const float instantVelocity =
+          (std::abs(offset - m_lastScrollOffset) / std::max(viewportH, 1.0F)) / (elapsed / 1000.0F);
+      m_scrollVelocity =
+          (m_scrollVelocity == 0.0F) ? instantVelocity : (0.6F * m_scrollVelocity + 0.4F * instantVelocity);
+      m_fastScroll = m_scrollVelocity > 3.5F;
+      m_lastScrollOffset = offset;
+      m_lastScrollTime = now;
+    }
+  } else {
+    m_lastScrollOffset = offset;
+    m_lastScrollTime = now;
+  }
   if (m_applyingAreaScroll && m_areaPointerCapture && m_adapter != nullptr && m_adapter->areaSelectionCurrent()) {
     updateAreaSelection(m_areaViewportX, offset + m_areaViewportY);
     updateAreaScroll();

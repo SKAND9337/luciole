@@ -1273,6 +1273,63 @@ namespace {
         && read(invalidBase.paths().overrides) == before
     );
   }
+
+  void testAnimationSettings() {
+    Fixture fixture;
+    luciole::ConfigService service(fixture.paths());
+    TEST_CHECK(
+        service.reload()
+        && service.settings().animations.scrollReveal == true
+        && service.settings().browser.reduceAnimations == false
+    );
+    fixture.write("config.toml", "[animations]\nscroll_reveal = false\n");
+    TEST_CHECK(
+        service.reload()
+        && service.settings().animations.scrollReveal == false
+        && service.settings().browser.reduceAnimations == true
+    );
+    fixture.write("settings.toml", "[browser]\nreduce_animations = false\n");
+    TEST_CHECK(
+        service.reload()
+        && service.settings().animations.scrollReveal == true
+        && service.settings().browser.reduceAnimations == false
+    );
+    fixture.write("settings.toml", "[browser]\nscroll_reveal = false\n");
+    TEST_CHECK(
+        service.reload()
+        && service.settings().animations.scrollReveal == false
+        && service.settings().browser.reduceAnimations == true
+    );
+    fixture.write(
+        "settings.toml",
+        "[animations]\nscroll_reveal = true\n[browser]\nreduce_animations = false\nscroll_reveal = true\n"
+    );
+    TEST_CHECK(service.reload());
+    const std::array reduceOn{luciole::OverrideEdit{luciole::BrowserPreference::ReduceAnimations, true}};
+    TEST_CHECK(service.saveOverrides(reduceOn) == luciole::AtomicWriteState::Durable);
+    TEST_CHECK(service.settings().browser.reduceAnimations == true);
+    TEST_CHECK(service.settings().animations.scrollReveal == false);
+    TEST_CHECK(service.reload());
+    TEST_CHECK(service.settings().browser.reduceAnimations == true);
+    TEST_CHECK(service.settings().animations.scrollReveal == false);
+    const std::array reduceOff{luciole::OverrideEdit{luciole::BrowserPreference::ReduceAnimations, false}};
+    TEST_CHECK(service.saveOverrides(reduceOff) == luciole::AtomicWriteState::Durable);
+    TEST_CHECK(service.settings().browser.reduceAnimations == false);
+    TEST_CHECK(service.settings().animations.scrollReveal == true);
+    TEST_CHECK(service.reload());
+    TEST_CHECK(service.settings().browser.reduceAnimations == false);
+    TEST_CHECK(service.settings().animations.scrollReveal == true);
+    const std::array resetOverride{luciole::OverrideEdit{luciole::BrowserPreference::ReduceAnimations, std::nullopt}};
+    TEST_CHECK(service.saveOverrides(resetOverride) == luciole::AtomicWriteState::Durable);
+    TEST_CHECK(service.settings().browser.reduceAnimations == true);
+    TEST_CHECK(service.settings().animations.scrollReveal == false);
+    TEST_CHECK(service.reload());
+    TEST_CHECK(service.settings().browser.reduceAnimations == true);
+    TEST_CHECK(service.settings().animations.scrollReveal == false);
+    fixture.write("invalid.toml", "[animations]\nscroll_reveal = \"not_a_bool\"\n");
+    const auto issues = luciole::validateConfigFile(fixture.paths().base.parent_path() / "invalid.toml");
+    TEST_CHECK(!issues.empty());
+  }
 } // namespace
 
 int main() {
@@ -1312,6 +1369,7 @@ int main() {
     testInteractionModes();
     testThumbnailSettings();
     testOverrideSaving();
+    testAnimationSettings();
     std::println("settings checks passed");
     return 0;
   } catch (const std::exception& error) {

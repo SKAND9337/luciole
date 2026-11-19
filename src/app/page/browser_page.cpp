@@ -92,17 +92,23 @@ BrowserPage::BrowserPage(
       m_listAdapter(
           m_browser, m_icons, m_thumbnails, luciole::ViewMode::List,
           [this] { return m_connection.keyboardModifiers(); },
-          [this] { return m_fileKeys.keyboardFocus() && m_list != nullptr && m_list->focusArea()->focused(); }
+          [this] { return m_fileKeys.keyboardFocus() && m_list != nullptr && m_list->focusArea()->focused(); },
+          m_reveal, settings.reduceAnimations ? nullptr : &animations
       ),
       m_gridAdapter(
           m_browser, m_icons, m_thumbnails, luciole::ViewMode::Grid,
           [this] { return m_connection.keyboardModifiers(); },
-          [this] { return m_fileKeys.keyboardFocus() && m_list != nullptr && m_list->focusArea()->focused(); }
+          [this] { return m_fileKeys.keyboardFocus() && m_list != nullptr && m_list->focusArea()->focused(); },
+          m_reveal, settings.reduceAnimations ? nullptr : &animations
       ),
       m_preferences(preferences), m_savedSettings(settings), m_pins(pins), m_drives(drives), m_hub(hub),
       m_jobs(hub, id), m_viewMode(settings.viewMode), m_clipboard(clipboard), m_workspaceId(id) {
   if (m_preferences.settings()) {
     m_savedSettings = m_preferences.settings()->browser;
+    const bool scrollReveal = !m_savedSettings.reduceAnimations;
+    AnimationManager* anim = scrollReveal ? &m_animations : nullptr;
+    m_listAdapter.setAnimationManager(anim);
+    m_gridAdapter.setAnimationManager(anim);
   }
   m_gridZoom = static_cast<std::size_t>(
       std::ranges::find(luciole::kGridIconSizes, settings.gridIconSize) - luciole::kGridIconSizes.begin()
@@ -712,6 +718,8 @@ void BrowserPage::hide() {
             : std::nullopt
     };
     // Releasing the cells lets the shared ThumbnailService evict this page's thumbnails when its budget needs room.
+    m_listAdapter.resetReveal();
+    m_gridAdapter.resetReveal();
     m_list->setAdapter(nullptr);
     m_millerView->suspend();
     m_thumbnailContext = 0;
@@ -1796,6 +1804,9 @@ void BrowserPage::resetFileView() {
   m_gridAdapter.onPointerCancel();
   m_viewAnchor.reset();
   m_list->scrollView().requestScrollToOffset(0);
+  m_reveal.reset();
+  m_listAdapter.resetReveal();
+  m_gridAdapter.resetReveal();
 }
 
 bool BrowserPage::targetsCurrent(const std::vector<luciole::DirectoryEntry>& targets) {
@@ -1922,6 +1933,10 @@ void BrowserPage::applySettings(const luciole::BrowserSettings& settings, bool f
   if (before.millerShowParents != settings.millerShowParents && m_miller.enabled()) {
     m_restartMiller = true;
   }
+  const bool scrollReveal = !settings.reduceAnimations;
+  AnimationManager* anim = scrollReveal ? &m_animations : nullptr;
+  m_listAdapter.setAnimationManager(anim);
+  m_gridAdapter.setAnimationManager(anim);
   m_savedSettings = settings;
   m_browserDirty = true;
   m_surface->requestLayout();
@@ -1985,6 +2000,8 @@ void BrowserPage::setViewMode(luciole::ViewMode mode) {
 void BrowserPage::applyViewMode() {
   m_listAdapter.onPointerCancel();
   m_gridAdapter.onPointerCancel();
+  m_listAdapter.resetReveal();
+  m_gridAdapter.resetReveal();
   if (m_miller.enabled()) {
     m_regularList->setVisible(false);
     m_regularList->setParticipatesInLayout(false);
@@ -2153,6 +2170,9 @@ void BrowserPage::syncBrowser() {
     );
     m_detailsHeader.setOffset(0);
     m_fileKeys.resetReveal();
+    m_reveal.reset();
+    m_listAdapter.resetReveal();
+    m_gridAdapter.resetReveal();
   }
   m_fileKeys.applyPendingCursor();
   m_browser.setExpandableFolders(
